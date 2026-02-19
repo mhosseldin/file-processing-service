@@ -24,6 +24,7 @@ const config = {
 
   inputDir: readString("INPUT_DIR", path.join(STORAGE_DIR, "input")),
   outputDir: readString("OUTPUT_DIR", path.join(STORAGE_DIR, "output")),
+  tmpDir: readString("TMP_DIR", path.join(STORAGE_DIR, "tmp")),
 
   logLevel: readString("LOG_LEVEL", "info"),
 

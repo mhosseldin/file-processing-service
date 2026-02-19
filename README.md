@@ -1,17 +1,19 @@
 # File Processing Service (Node.js)
 
-This is a small **file processing service** project.  
-The idea is simple: files are dropped into an input folder, and the service processes them and writes results into an output folder.
+This is a small file processing service project.
 
-I built this project to practice real Node.js filesystem topics (streams, watcher, backpressure) and also try to write code in a “production style” (config, logger, layers, clean structure).
+The idea is simple:
+Files are dropped into an input folder, and the service detects them, processes them, and writes the result into an output folder.
+
+I built this project to practice real Node.js filesystem concepts (watcher, queue, concurrency control, atomic writes) and to try writing code in a more production-style structure (config, logger, layers, separation of concerns).
 
 ---
 
 ## Core Flow (Big Picture)
 
-**Input folder → Detect new file → Queue → Worker pool → Stream processing → Atomic output write**
+Input folder → Detect new file → Queue → Worker pool → Processing → Atomic output write
 
-Or like this:
+Or visually:
 
 Watcher  
 ↓  
@@ -19,67 +21,179 @@ Bounded Queue
 ↓  
 Worker Pool (maxConcurrency = 4)  
 ↓  
-Stream pipeline (with backpressure)  
+Processing (with retry logic)  
 ↓  
 Atomic write (tmp → rename)
 
 ---
 
-## Why not “just watch and process immediately”?
+## Why not just watch and process immediately?
 
-If a lot of files appear at once (example: 500 / 1000 files), doing `fs.watch → processFile()` can cause problems like:
+If many files appear at once (for example 500–1000 files), doing:
+
+fs.watch → processFile()
+
+can cause problems like:
 
 - too many open files (EMFILE)
-- memory pressure (too many pipelines running)
+- memory pressure (too many async jobs running at once)
 - disk thrashing
-- unstable behavior (random failures under load)
+- unstable behavior under load
 
-So the project is designed around **controlled concurrency**:
+So instead of processing files immediately, this project introduces:
 
-- the watcher should be lightweight
-- files go into a queue
-- only a limited number of workers process files at the same time
+- a bounded queue
+- a worker pool
+- controlled concurrency
 
----
-
-## What I’m practicing in this project
-
-- **fs.watch** (folder watcher)
-- **Streams** (`createReadStream` / `createWriteStream`)
-- **Backpressure** (streams slow down automatically when the destination is slow)
-- **Queue + Worker Pool** (controlled concurrency)
-- **Atomic output writes** (write to temp file, then rename)
-- **Failure handling** basics (retry logic, quarantine folder later)
-- Clean code structure (separation of concerns)
+Only a limited number of files are processed at the same time.
 
 ---
 
-## Project Layers
+## Architecture Overview
 
-I’m building the project in layers, not all at once.
+The service is split into clear layers.
 
-### Layer 1: Bootstrap + Config + Logger
+### 1) Watcher Layer
 
-Layer 1 goal:
+Responsible for:
 
-- a clean entrypoint to run the service
-- one place for settings (config)
-- structured logs with log levels
+- watching the input folder using fs.promises.watch
+- debouncing duplicate events
+- checking file stability (to avoid reading half-written files)
+- emitting a clean "file:ready" event
 
-Deliverables:
+The watcher does not process files directly.
 
-- `src/config/config.js` → config values using `process.env` with defaults
-- `src/logging/logger.js` → logger with levels: `debug, info, warn, error`
-- `src/index.js` → starts the service and prints “service started” + config
+---
 
-Example logs are JSON like:
+### 2) Queue Layer (Worker Pool)
 
-```json
-{
-  "timestamp": "2026-02-17T20:07:41.969Z",
-  "level": "info",
-  "msg": "Configuration loaded",
-  "service": "file-processing-service",
-  "meta": { "config": { "...": "..." } }
-}
+A custom JobQueue class that:
+
+- stores pending jobs
+- limits concurrent execution (maxConcurrency)
+- prevents unbounded growth (maxSize)
+- isolates job failures
+- automatically schedules the next job when one finishes
+
+This avoids overloading the system when many files arrive at once.
+
+---
+
+### 3) Processing Layer
+
+processFile(filePath) is responsible for:
+
+- reading the file
+- applying a simple transform (currently: converting content to uppercase)
+- writing the output using atomic write
+- retrying transient errors (like EBUSY, EMFILE, EPERM)
+
+Retry logic is limited and only applied to retryable errors.
+
+---
+
+### 4) Filesystem Utilities
+
+safeWriteFileAtomic():
+
+- writes to a temporary file
+- renames it to the final target
+- cleans up the temp file if something fails
+
+This prevents partially written output files.
+
+---
+
+## Failure Handling Strategy
+
+- Retry only transient errors
+- Do not retry corrupted data
+- Do not crash the queue when a job fails
+- Log all failures in structured JSON format
+
+In a real production system, failed files should be moved to a quarantine folder.  
+For simplicity, this project only logs the error.
+
+---
+
+## Configuration
+
+The service uses environment variables:
+
+- SERVICE_NAME
+- INPUT_DIR
+- OUTPUT_DIR
+- LOG_LEVEL
+- MAX_CONCURRENCY
+
+Defaults are provided in config.js.
+
+Example:
+
+LOG_LEVEL=debug MAX_CONCURRENCY=2 npm run dev
+
+---
+
+## Project Structure
+
+```text
+src/
+├── config/
+├── fs/
+├── logging/
+├── processing/
+├── queue/
+├── watcher/
+└── index.js
 ```
+
+Each folder has a single responsibility.
+
+---
+
+## Example Log Output
+
+{
+"timestamp": "2026-02-19T19:34:26.530Z",
+"level": "info",
+"msg": "Processing file",
+"service": "file-processing-service",
+"meta": {
+"file": "storage/input/testInput.txt"
+}
+}
+
+Logs are structured JSON to imitate production logging style.
+
+---
+
+## What This Project Demonstrates
+
+- Event-driven design
+- Controlled concurrency
+- Bounded queue
+- Retry strategy
+- Atomic filesystem operations
+- Clean separation of concerns
+- Graceful shutdown handling
+
+---
+
+## Limitations (Intentional Simplifications)
+
+- Processing currently uses readFile (not full stream pipeline)
+- No quarantine folder implemented
+- No metrics system
+- Single-process design
+
+These can be extended later.
+
+---
+
+## Final Note
+
+This project is structured like a small service with clear responsibilities and controlled concurrency.
+
+The main goal was to understand how real systems handle filesystem events, queueing, and failure handling in Node.js.
